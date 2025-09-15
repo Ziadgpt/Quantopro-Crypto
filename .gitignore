@@ -1,0 +1,8 @@
+crypto_data.db
+*.log
+*.csv
+.venv/
+__pycache__/
+.pytest_cache/
+.coverage
+Dockerfile.build
