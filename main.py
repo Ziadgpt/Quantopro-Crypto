@@ -1,62 +1,34 @@
 # main.py
-import argparse
-import asyncio
-import subprocess
-import sys
-import os
-
+import argparse, asyncio, subprocess, sys, os
 from data.pipeline import run_pipeline
 from utils.logger import setup_logger
-# Import the new training functions
 from models.hmm_model import train_hmm_model
 from models.lstm_model import train_lstm_model
+from models.synthesizer import train_synthesizer_model
+from trading.backtesting import run_backtest
 
 logger = setup_logger('main', 'main.log')
 
-
 def launch_dashboard():
-    """Launches the Streamlit dashboard."""
     dashboard_path = os.path.join("ui", "dashboard.py")
-    if not os.path.exists(dashboard_path):
-        logger.error(f"Dashboard file not found: {dashboard_path}")
-        return
-    logger.info("Launching Streamlit dashboard...")
     command = [sys.executable, "-m", "streamlit", "run", dashboard_path]
     subprocess.run(command)
 
-
 def main():
-    """Main function to parse arguments and control the bot."""
     parser = argparse.ArgumentParser(description="Crypto Bot 2.0 - Main Controller")
-
-    parser.add_argument('--pipeline', action='store_true', help="Run the data fetching and processing pipeline.")
-    parser.add_argument('--dashboard', action='store_true', help="Launch the Streamlit dashboard.")
-    parser.add_argument('--train', type=str, choices=['hmm', 'lstm', 'all'],
-                        help="Train a model: 'hmm', 'lstm', or 'all'.")
-
+    parser.add_argument('--pipeline', action='store_true', help="Run the full data pipeline.")
+    parser.add_argument('--dashboard', action='store_true', help="Launch the dashboard.")
+    parser.add_argument('--train', type=str, choices=['hmm', 'lstm', 'synthesizer', 'all'], help="Train a model.")
+    parser.add_argument('--backtest', action='store_true', help="Run a backtest.")
     args = parser.parse_args()
 
-    if args.pipeline:
-        logger.info("Starting data pipeline from main controller.")
-        asyncio.run(run_pipeline())
-        logger.info("Data pipeline finished.")
-
-    elif args.dashboard:
-        launch_dashboard()
-
+    if args.pipeline: asyncio.run(run_pipeline())
+    elif args.dashboard: launch_dashboard()
     elif args.train:
-        if args.train in ['hmm', 'all']:
-            logger.info("Starting HMM model training...")
-            train_hmm_model()
-            logger.info("HMM model training finished.")
-        if args.train in ['lstm', 'all']:
-            logger.info("Starting LSTM model training...")
-            train_lstm_model()
-            logger.info("LSTM model training finished.")
+        if args.train in ['hmm', 'all']: train_hmm_model()
+        if args.train in ['lstm', 'all']: train_lstm_model()
+        if args.train in ['synthesizer', 'all']: train_synthesizer_model()
+    elif args.backtest: run_backtest()
+    else: parser.print_help()
 
-    else:
-        parser.print_help()
-
-
-if __name__ == "__main__":
-    main()
+if __name__ == "__main__": main()
