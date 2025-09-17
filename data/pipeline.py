@@ -3,155 +3,176 @@ import pandas as pd
 import numpy as np
 import requests
 import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+
 from dydx_v4_client.indexer.rest.indexer_client import IndexerClient
 from config.config import INDEXER_URL, TRADING_MARKETS, CANDLE_RESOLUTION, DATA_DAYS
 from data.database import save_data, read_data
 from utils.logger import setup_logger
+from models.feature_engineering import generate_features
 
 logger = setup_logger('data_pipeline', 'data_pipeline.log')
 
+
 async def setup_client():
     """Initialize dYdX v4 mainnet client."""
-    return IndexerClient(f"https://{INDEXER_URL}")
+    return IndexerClient(host=f"https://{INDEXER_URL}")
+
 
 async def get_available_markets():
     """Asynchronously fetch available markets from dYdX v4 mainnet."""
     try:
         client = await setup_client()
         response = await client.markets.get_perpetual_markets()
-        markets = list(response.get('markets', response.get('data', {}).get('markets', {})).keys())
-        logger.info(f"Successfully fetched {len(markets)} available markets: {markets}")
-        print(f"Available markets: {markets}")
+        markets = list(response.get('markets', {}).keys())
         return markets
     except Exception as e:
         logger.error(f"Error fetching markets: {e}", exc_info=True)
-        print(f"Error fetching markets: {e}")
         return []
 
+
+async def fetch_ohlcv(market='BTC-USD', timeframe=CANDLE_RESOLUTION, limit=1000):
+    """Asynchronously fetch OHLCV data."""
+    client = await setup_client()
+    markets_to_try = [market, market.replace('USD', 'USDT')]
+    to_iso, from_iso = datetime.utcnow(), datetime.utcnow() - timedelta(days=DATA_DAYS)
+
+    for mkt in markets_to_try:
+        try:
+            response = await client.markets.get_perpetual_market_candles(
+                market=mkt, resolution=timeframe, from_iso=from_iso.isoformat() + 'Z', to_iso=to_iso.isoformat() + 'Z',
+                limit=limit
+            )
+            candles = response.get('candles', [])
+            if not candles: continue
+
+            df = pd.DataFrame(candles)[['startedAt', 'open', 'high', 'low', 'close', 'baseTokenVolume']]
+            df.columns = ['started_at', 'open', 'high', 'low', 'close', 'base_token_volume']
+            df['started_at'] = pd.to_datetime(df['started_at'])
+            df[df.columns[1:]] = df[df.columns[1:]].apply(pd.to_numeric, errors='coerce')
+            df.dropna(inplace=True)
+            df.sort_values('started_at', inplace=True, ignore_index=True)
+            return df
+        except Exception:
+            continue
+    return pd.DataFrame()
+
+
+async def fetch_funding_rates(market='BTC-USD'):
+    """Asynchronously fetch historical funding rates using a direct HTTP request."""
+    markets_to_try = [market, market.replace('USD', 'USDT')]
+    from_iso_str = (datetime.utcnow() - timedelta(days=DATA_DAYS)).isoformat() + 'Z'
+
+    for mkt in markets_to_try:
+        url = f"https://{INDEXER_URL}/v4/historicalFunding/{mkt}"
+        params = {'effectiveAtOrAfter': from_iso_str}
+
+        try:
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(None, lambda: requests.get(url, params=params, timeout=10))
+            response.raise_for_status()
+
+            data = response.json()
+            rates = data.get('historicalFunding', [])
+
+            if not rates:
+                logger.warning(f"No funding rates returned for {mkt} from direct API call.")
+                continue
+
+            df = pd.DataFrame(rates)[['effectiveAt', 'rate']]
+            df.columns = ['started_at', 'funding_rate']
+            df['started_at'] = pd.to_datetime(df['started_at'])
+            df['funding_rate'] = pd.to_numeric(df['funding_rate'], errors='coerce')
+            df.dropna(inplace=True)
+            df.sort_values('started_at', inplace=True, ignore_index=True)
+            logger.info(f"✅ Successfully fetched {len(df)} funding rate entries for {mkt} via direct API call.")
+            return df
+
+        except requests.exceptions.RequestException as e:
+            logger.warning(f"Direct API call failed for funding rates for {mkt}: {e}")
+
+    logger.error(f"Failed to fetch funding rates for primary market {market} after all attempts.")
+    return pd.DataFrame()
+
+
 def fetch_sentiment(market='BTC-USD'):
-    """Fetch sentiment from CoinGecko."""
-    coin_map = {'BTC-USD': 'bitcoin', 'ETH-USD': 'ethereum', 'SOL-USD': 'solana', 'ADA-USD': 'cardano', 'XRP-USD': 'ripple'}
-    coin = coin_map.get(market, market.split('-')[0].lower())
-    url = f"https://api.coingecko.com/api/v3/coins/{coin}"
+    """Synchronous function to fetch sentiment from CoinGecko."""
+    coin_map = {'BTC-USD': 'bitcoin', 'ETH-USD': 'ethereum', 'SOL-USD': 'solana', 'ADA-USD': 'cardano',
+                'XRP-USD': 'ripple'}
+    coin_id = coin_map.get(market, market.split('-')[0].lower())
+    url = f"https://api.gecko.com/api/v3/coins/{coin_id}"
     try:
         response = requests.get(url, timeout=10)
         response.raise_for_status()
-        data = response.json()
-        sentiment_score = data.get('sentiment_votes_up_percentage', 0.0)
-        logger.info(f"Fetched sentiment for {market}: {sentiment_score}")
-        print(f"Fetched sentiment for {market}: {sentiment_score}")
-        return sentiment_score
-    except Exception as e:
-        logger.error(f"Error fetching sentiment for {market}: {e}")
-        print(f"Error fetching sentiment for {market}: {e}")
+        return response.json().get('sentiment_votes_up_percentage', 0.0)
+    except requests.exceptions.RequestException:
         return 0.0
 
-async def fetch_data(market='BTC-USD', timeframe=CANDLE_RESOLUTION, limit=1000, retries=3, delay=2):
-    """Asynchronously fetch OHLCV from dYdX v4 mainnet with retries."""
-    markets_to_try = [market, market.replace('USD', 'USDT')]
-    client = await setup_client()
-    for mkt in markets_to_try:
-        for attempt in range(retries):
-            try:
-                logger.info(f"Attempting to fetch data for {mkt} (attempt {attempt + 1}/{retries})")
-                to_iso = datetime.utcnow()
-                from_iso = to_iso - timedelta(days=DATA_DAYS)
-                response = await client.markets.get_perpetual_market_candles(
-                    market=mkt,
-                    resolution=timeframe,
-                    from_iso=from_iso.isoformat() + 'Z',
-                    to_iso=to_iso.isoformat() + 'Z',
-                    limit=limit
-                )
-                logger.debug(f"Raw API response for {mkt}: {response}")
-                candles = response.get('candles', response.get('data', {}).get('candles', []))
-                if not candles:
-                    logger.warning(f"No candles returned for {mkt} at {timeframe}. Attempt {attempt + 1}/{retries}.")
-                    if attempt < retries - 1:
-                        await asyncio.sleep(delay)
-                    continue
-                df = pd.DataFrame([{
-                    'started_at': pd.to_datetime(c.get('startedAt'), errors='coerce'),
-                    'open': float(c.get('open', 0)),
-                    'high': float(c.get('high', 0)),
-                    'low': float(c.get('low', 0)),
-                    'close': float(c.get('close', 0)),
-                    'base_token_volume': float(c.get('baseTokenVolume', 0))
-                } for c in candles])
-                df.dropna(subset=['started_at'], inplace=True)
-                if df.empty:
-                    logger.warning(f"DataFrame empty after processing candles for {mkt}.")
-                    continue
-                df.sort_values('started_at', inplace=True, ignore_index=True)
-                df['log_returns'] = np.log(df['close'] / df['close'].shift(1)).fillna(0)
-                df['volatility'] = df['log_returns'].rolling(window=20).std().fillna(0)
-                df['sentiment'] = fetch_sentiment(market)
-                df_temp = df.set_index('started_at')
-                agg_rules = {
-                    'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last',
-                    'base_token_volume': 'sum', 'log_returns': 'sum',
-                    'volatility': 'mean', 'sentiment': 'last'
-                }
-                df_1h = df_temp.resample('h').agg(agg_rules).dropna(subset=['open']).reset_index()
-                df_4h = df_temp.resample('4h').agg(agg_rules).dropna(subset=['open']).reset_index()
-                df = df.reset_index()
-                logger.info(f"Fetched and processed {len(df)} 15-min candles for {mkt}")
-                print(f"Fetched {len(df)} 15-min candles for {mkt}")
-                return df, df_1h, df_4h
-            except Exception as e:
-                logger.error(f"Error fetching {mkt} (attempt {attempt + 1}/{retries}): {e}", exc_info=True)
-                print(f"Error fetching {mkt} (attempt {attempt + 1}/{retries}): {e}")
-                if attempt < retries - 1:
-                    await asyncio.sleep(delay)
-                continue
-        logger.error(f"Failed to fetch data for {mkt} after {retries} attempts")
-        print(f"Failed to fetch data for {mkt} after {retries} attempts")
-    logger.error(f"Failed to fetch data for {market}")
-    print(f"Failed to fetch data for {market}")
-    return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
-async def process_market(market):
-    """Helper coroutine to fetch, process, and save data for a single market."""
+async def process_and_save_market(market, df_btc=None):
+    """Fetches all data, merges, generates features, and saves."""
     try:
-        logger.info(f"Processing market {market}")
-        df, df_1h, df_4h = await fetch_data(market)
-        if not df.empty:
-            logger.info(f"Saving data for {market}, {market}_1H, and {market}_4H")
-            save_data(df, market)
-            save_data(df_1h, f"{market}_1H")
-            save_data(df_4h, f"{market}_4H")
-        else:
-            logger.warning(f"Received empty DataFrame for {market}, skipping save.")
-            print(f"Received empty DataFrame for {market}, skipping save.")
-    except Exception as e:
-        logger.error(f"Unhandled error while processing market {market}: {e}", exc_info=True)
-        print(f"Unhandled error while processing market {market}: {e}")
+        logger.info(f"Processing market: {market}")
 
-async def fetch_all_data(markets=TRADING_MARKETS):
-    """Concurrently fetch and save data for all specified markets."""
-    available_markets = await get_available_markets()
-    tasks = []
-    for market in markets:
-        if market in available_markets or market.replace('USD', 'USDT') in available_markets:
-            tasks.append(process_market(market))
-        else:
-            logger.warning(f"Market {market} is not available on dYdX. Skipping.")
-            print(f"Market {market} is not available on dYdX. Skipping.")
-    await asyncio.gather(*tasks)
-    logger.info("--- Starting Post-Save Validation ---")
-    for market in markets:
-        df = read_data(market)
-        logger.info(f"Validation: Found {len(df)} rows in DB for {market}")
-        print(f"Validation: Found {len(df)} rows in DB for {market}")
+        ohlcv_task = fetch_ohlcv(market)
+        funding_task = fetch_funding_rates(market)
+        df_ohlcv, df_funding = await asyncio.gather(ohlcv_task, funding_task)
 
-def main():
-    """Main function to run the asynchronous data fetching pipeline."""
-    try:
-        asyncio.run(fetch_all_data())
+        if df_ohlcv.empty:
+            logger.warning(f"No OHLCV data for {market}, skipping.")
+            return
+
+        if not df_funding.empty:
+            df_15m = pd.merge_asof(df_ohlcv, df_funding, on='started_at')
+            # --- CODE CLEANUP: Replaced deprecated fillna(method=...) with modern .ffill() ---
+            df_15m['funding_rate'] = df_15m['funding_rate'].ffill()
+        else:
+            df_15m = df_ohlcv
+            df_15m['funding_rate'] = 0.0
+
+        df_15m.fillna(0, inplace=True)
+
+        df_15m['sentiment'] = fetch_sentiment(market)
+        df_15m['log_returns'] = np.log(df_15m['close'] / df_15m['close'].shift(1)).fillna(0)
+        df_15m['volatility'] = df_15m['log_returns'].rolling(window=20).std().fillna(0)
+
+        df_temp = df_15m.set_index('started_at')
+        agg_rules = {col: 'last' for col in df_15m.columns if col != 'started_at'}
+        agg_rules.update({'open': 'first', 'high': 'max', 'low': 'min', 'base_token_volume': 'sum'})
+
+        df_1h = df_temp.resample('1h').agg(agg_rules).dropna(subset=['open']).reset_index()
+        df_4h = df_temp.resample('4h').agg(agg_rules).dropna(subset=['open']).reset_index()
+
+        df_15m = generate_features(df_15m, df_btc)
+        df_1h = generate_features(df_1h, df_btc)
+        df_4h = generate_features(df_4h, df_btc)
+
+        save_data(df_15m, market)
+        save_data(df_1h, f"{market}_1H")
+        save_data(df_4h, f"{market}_4H")
+        logger.info(f"Successfully processed and saved all timeframes for {market}")
+
     except Exception as e:
-        logger.critical(f"The data pipeline failed to run: {e}", exc_info=True)
-        print(f"The data pipeline failed to run: {e}")
+        logger.error(f"Unhandled error processing market {market}: {e}", exc_info=True)
+
+
+async def run_pipeline(markets=TRADING_MARKETS):
+    """Main pipeline execution function."""
+    logger.info("--- Starting Data Pipeline ---")
+
+    btc_market = "BTC-USD"
+    await process_and_save_market(btc_market)
+    df_btc = read_data(btc_market)
+    if df_btc.empty:
+        logger.error("Failed to process BTC-USD. Correlation features will be skipped.")
+
+    altcoin_markets = [m for m in markets if m != btc_market]
+    if altcoin_markets:
+        tasks = [process_and_save_market(market, df_btc) for market in altcoin_markets]
+        await asyncio.gather(*tasks)
+
+    logger.info("--- Data Pipeline Finished ---")
+
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(run_pipeline())

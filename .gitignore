@@ -1,8 +1,22 @@
-crypto_data.db
-*.log
-*.csv
-.venv/
+# Byte-compiled / optimized / DLL files
 __pycache__/
-.pytest_cache/
-.coverage
-Dockerfile.build
+*.py[cod]
+*$py.class
+
+# Virtual environment
+.venv/
+venv/
+ENV/
+
+# IDE configuration files
+.idea/
+.vscode/
+
+# Database and log files
+*.db
+*.log
+*.sqlite3
+
+# OS-specific files
+.DS_Store
+Thumbs.db

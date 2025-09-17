@@ -1,10 +1,17 @@
-pandas==2.1.4
+# Core data science and numerical libraries
+pandas==2.0.3
 numpy==1.24.3
-scikit-learn==1.3.0
-tensorflow==2.13.0
-keras==2.13.1
-ccxt==4.1.0
-streamlit==1.28.0
-plotly==5.15.0
-hyperopt==0.2.7
-arch==5.5.0
+
+# API clients and networking
+requests==2.32.3
+dydx-v4-client==1.1.5
+
+# UI and Visualization
+streamlit==1.38.0
+plotly==5.24.1
+
+# Machine Learning and Econometrics Models
+tensorflow==2.16.2
+arch==7.1.0
+hmmlearn==0.3.2
+scikit-learn==1.5.1 # hmmlearn dependency
