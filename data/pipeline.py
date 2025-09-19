@@ -15,7 +15,31 @@ async def setup_client():
     return IndexerClient(host=f"https://{INDEXER_URL}")
 
 
+async def get_available_markets():
+    """Asynchronously fetch available markets from dYdX v4 mainnet."""
+    try:
+        client = await setup_client()
+        response = await client.markets.get_perpetual_markets()
+
+        # --- FIX: Handle both object and dict response types from the client ---
+        try:
+            # Assumes the response is an object with a .data attribute
+            markets = list(response.data['markets'].keys())
+        except AttributeError:
+            # Assumes the response is a raw dictionary
+            markets = list(response['markets'].keys())
+        # --- END FIX ---
+
+        logger.info(f"Successfully fetched {len(markets)} available markets.")
+        return markets
+    except Exception as e:
+        logger.error(f"Error fetching markets: {e}", exc_info=True)
+        return []
+
+
 async def fetch_ohlcv(market='BTC-USD', timeframe=CANDLE_RESOLUTION, total_candles=3000):
+    # This function and the rest of the file remain the same...
+    # (The rest of the file is omitted for brevity but should remain as it was)
     client, markets_to_try = await setup_client(), [market, market.replace('USD', 'USDT')]
     for mkt in markets_to_try:
         all_candles_list, to_iso_str = [], datetime.utcnow().isoformat() + "Z"
@@ -110,11 +134,25 @@ async def process_and_save_market(market, df_btc=None):
 
 async def run_pipeline(markets=TRADING_MARKETS):
     logger.info("--- Starting Prediction Pipeline ---")
-    await process_and_save_market("BTC-USD")
-    df_btc = read_data("BTC-USD")
-    altcoins = [m for m in markets if m != "BTC-USD"]
-    if altcoins: await asyncio.gather(*[process_and_save_market(m, df_btc) for m in altcoins])
+    available_markets = await get_available_markets()
+
+    # Ensure we only process markets that are available
+    markets_to_process = [m for m in markets if m in available_markets]
+
+    # Process BTC first if it's in the list
+    if "BTC-USD" in markets_to_process:
+        await process_and_save_market("BTC-USD")
+        df_btc = read_data("BTC-USD")
+    else:
+        df_btc = None  # No BTC data to correlate against
+
+    # Process altcoins concurrently
+    altcoins = [m for m in markets_to_process if m != "BTC-USD"]
+    if altcoins:
+        await asyncio.gather(*[process_and_save_market(m, df_btc) for m in altcoins])
+
     logger.info("--- Prediction Pipeline Finished ---")
 
 
-if __name__ == "__main__": asyncio.run(run_pipeline())
+if __name__ == "__main__":
+    asyncio.run(run_pipeline())
