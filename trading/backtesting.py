@@ -1,7 +1,14 @@
-# trading/backtester.py
+# trading/backtesting.py
 import pandas as pd
 import numpy as np
 import joblib
+import sys
+import os
+
+# Add project root to Python's path
+project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.append(project_root)
+
 from data.database import read_data
 from config.config import TRADING_MARKETS
 from utils.logger import setup_logger
@@ -9,80 +16,103 @@ from utils.logger import setup_logger
 logger = setup_logger('backtester', 'backtest.log')
 
 
-def run_backtest(market=TRADING_MARKETS[0], model_path='models/synthesizer_model.pkl'):
+def run_backtest(market=TRADING_MARKETS[0], initial_capital=10000):
     """
-    Runs a vector-based backtest of the trading strategy.
+    Runs a vector-based backtest on the trained Synthesizer model's signals.
     """
-    logger.info(f"--- Starting Backtest for {market} ---")
+    logger.info(f"Starting backtest for {market} with initial capital ${initial_capital:,.2f}")
 
-    # 1. Load Model and Data
-    try:
-        payload = joblib.load(model_path)
-        model = payload['model']
-        features = payload['features']
-    except FileNotFoundError:
-        logger.error(f"Model not found at {model_path}. Please train the synthesizer first.")
-        return
-
+    # 1. Load Data and Model
     df = read_data(market)
+    try:
+        model_package = joblib.load('models/synthesizer_model.pkl')
+        model = model_package['model']
+        features = model_package['features']
+    except FileNotFoundError:
+        logger.error("Synthesizer model not found. Please train the model first.")
+        return {"error": "Model not found."}
+
     if df.empty or not all(f in df.columns for f in features):
-        logger.error("Data is insufficient for backtesting. Run the full pipeline.")
-        return
+        logger.error("Data is insufficient for backtesting. Run the pipeline and training first.")
+        return {"error": "Insufficient data."}
 
-    # 2. Generate Predictions (Conviction Score)
-    df['score'] = model.predict_proba(df[features])[:, 1]
+    # 2. Generate Predictions (Signals)
+    X = df[features]
+    df['signal'] = model.predict(X)
+    df['signal'] = df['signal'].shift(1).fillna(0)  # Shift to prevent lookahead bias
 
-    # 3. Trading Logic Simulation
-    entry_threshold = 0.70  # Enter a trade if conviction is > 70%
-    take_profit = 1.01  # 1% take profit
-    stop_loss = 0.995  # 0.5% stop loss
+    # --- FIX: Corrected the trade simulation logic ---
+    # 3. Simulate Trades
+    position = 0
+    entry_price = 0
+    entry_time = None
+    entry_bar = 0
+    trades = []
+    equity_over_time = [initial_capital]
+    capital = initial_capital
 
-    positions = np.zeros(len(df))
-    returns = []
+    for i, row in df.iterrows():
+        # Entry condition: Not in a position and signal is 1
+        if position == 0 and row['signal'] == 1:
+            position = 1
+            entry_price = row['open']  # Enter on the open of the next bar
+            entry_time = row['started_at']
+            entry_bar = i
 
-    for i in range(1, len(df)):
-        # Entry condition
-        if positions[i - 1] == 0 and df['score'].iloc[i] > entry_threshold:
-            positions[i] = 1  # Enter long position
-            entry_price = df['close'].iloc[i]
+        # Exit condition: In a position and 16 bars have passed
+        elif position == 1 and i >= entry_bar + 16:
+            exit_price = row['open']
+            exit_time = row['started_at']
 
-            # Simulate holding the position
-            for j in range(i + 1, len(df)):
-                # Take Profit condition
-                if df['high'].iloc[j] >= entry_price * take_profit:
-                    returns.append(take_profit - 1)
-                    i = j  # Move main loop forward
-                    break
-                # Stop Loss condition
-                elif df['low'].iloc[j] <= entry_price * stop_loss:
-                    returns.append(stop_loss - 1)
-                    i = j  # Move main loop forward
-                    break
-                # If neither is hit, continue holding
-                positions[j] = 1
-            else:  # Loop finished without break (end of data)
-                i = len(df)
+            pnl_pct = (exit_price - entry_price) / entry_price
+            capital = capital * (1 + pnl_pct)
+            equity_over_time.append(capital)
 
-    # 4. Performance Metrics
-    if not returns:
+            trades.append({
+                'entry_time': entry_time, 'entry_price': entry_price,
+                'exit_time': exit_time, 'exit_price': exit_price,
+                'pnl_pct': pnl_pct * 100
+            })
+
+            # Reset position state
+            position = 0
+            entry_price = 0
+            entry_time = None
+            entry_bar = 0
+    # --- END FIX ---
+
+    # 4. Calculate Performance Metrics
+    if not trades:
         logger.warning("No trades were executed during the backtest.")
-        return
+        return {"message": "No trades executed."}
 
-    total_trades = len(returns)
-    wins = sum(1 for r in returns if r > 0)
-    win_rate = (wins / total_trades) * 100 if total_trades > 0 else 0
+    trades_df = pd.DataFrame(trades)
 
-    returns_series = pd.Series(returns)
-    cumulative_returns = (1 + returns_series).cumprod()
-    total_return = (cumulative_returns.iloc[-1] - 1) * 100
+    # Create an equity curve DataFrame
+    equity_series = pd.Series(equity_over_time)
+    equity_df = pd.DataFrame({'equity': equity_series})
+    # We need to find the timestamps for when equity changed
+    trade_exit_indices = [df.index.get_loc(trades_df.iloc[i]['exit_time']) for i in range(len(trades_df))]
+    equity_timestamps = [df.iloc[0]['started_at']] + [df.loc[idx, 'started_at'] for idx in trade_exit_indices]
+    equity_df['started_at'] = equity_timestamps
 
-    logger.info("--- Backtest Results ---")
-    logger.info(f"Total Trades: {total_trades}")
-    logger.info(f"Win Rate: {win_rate:.2f}%")
-    logger.info(f"Total Return: {total_return:.2f}%")
+    net_profit = capital - initial_capital
+    win_rate = (trades_df['pnl_pct'] > 0).mean() * 100
+    total_trades = len(trades_df)
 
-    # You can add more metrics like Sharpe Ratio, Max Drawdown etc. here
+    peak = equity_df['equity'].cummax()
+    drawdown = (equity_df['equity'] - peak) / peak
+    max_drawdown = drawdown.min() * 100
 
+    logger.info(f"Backtest complete. Net Profit: ${net_profit:,.2f}, Win Rate: {win_rate:.2f}%")
 
-if __name__ == '__main__':
-    run_backtest()
+    return {
+        "kpis": {
+            "Net Profit ($)": f"${net_profit:,.2f}",
+            "Win Rate (%)": f"{win_rate:.2f}%",
+            "Max Drawdown (%)": f"{max_drawdown:.2f}%",
+            "Total Trades": total_trades
+        },
+        "equity_curve": equity_df[['started_at', 'equity']],
+        "trades_log": trades_df
+    }
