@@ -5,29 +5,48 @@ import joblib
 import tensorflow as tf
 from sklearn.preprocessing import MinMaxScaler
 from utils.logger import setup_logger
+from functools import lru_cache  # <-- Import the caching tool
 
 logger = setup_logger('predictor', 'predictor.log')
+
+
+# --- NEW: Caching helper functions ---
+@lru_cache(maxsize=None)
+def load_hmm_package(path):
+    """Loads the HMM model and scaler from disk, caching the result."""
+    logger.info(f"Loading HMM model from disk: {path}")
+    return joblib.load(path)
+
+
+@lru_cache(maxsize=None)
+def load_keras_model(path):
+    """Loads the Keras model from disk, caching the result."""
+    logger.info(f"Loading Keras model from disk: {path}")
+    return tf.keras.models.load_model(path)
+
+
+# --- END NEW ---
 
 
 def predict_hmm_regime(df, model_path='models/hmm_regime_model.pkl'):
     """
     Predicts the HMM regime for the given data.
-    FIX: Loads the scaler along with the model and scales data before prediction.
     """
     try:
-        # Load the dictionary containing the model and scaler
-        hmm_package = joblib.load(model_path)
+        # --- FIX: Use the cached loader ---
+        hmm_package = load_hmm_package(model_path)
+        # --- END FIX ---
+
         model = hmm_package['model']
         scaler = hmm_package['scaler']
 
         features = df[['f7_momentum', 'volatility']].values
         features = np.nan_to_num(features)
-
-        # Scale the features using the loaded scaler
         scaled_features = scaler.transform(features)
-
         df['hmm_regime'] = model.predict(scaled_features)
-        logger.info("Successfully predicted HMM regimes.")
+
+        # This log will now only appear once per model, not for every prediction
+        # logger.info("Successfully predicted HMM regimes.")
     except FileNotFoundError:
         logger.warning(f"HMM model file not found at {model_path}. Assigning default regime 0.")
         df['hmm_regime'] = 0
@@ -39,7 +58,10 @@ def predict_hmm_regime(df, model_path='models/hmm_regime_model.pkl'):
 
 def predict_lstm_forecast(df, model_path='models/lstm_forecast_model.keras', sequence_length=60):
     try:
-        model = tf.keras.models.load_model(model_path)
+        # --- FIX: Use the cached loader ---
+        model = load_keras_model(model_path)
+        # --- END FIX ---
+
         features_to_use = ['close', 'f7', 'volatility', 'funding_rate']
         scaler = MinMaxScaler(feature_range=(0, 1))
 
@@ -57,7 +79,7 @@ def predict_lstm_forecast(df, model_path='models/lstm_forecast_model.keras', seq
 
         predictions_scaled = model.predict(X, verbose=0)
 
-        dummy_array = np.zeros((len(predictions_scaled), len(features_to_use)))
+        dummy_array = np.zeros((len(predictions_scaled), len(predictions_scaled[0] * (len(features_to_use) - 1))))
         dummy_array[:, 0] = predictions_scaled.flatten()
         predictions = scaler.inverse_transform(dummy_array)[:, 0]
 
@@ -68,5 +90,8 @@ def predict_lstm_forecast(df, model_path='models/lstm_forecast_model.keras', seq
 
     except (FileNotFoundError, IOError):
         logger.warning(f"LSTM model not found at {model_path}. Assigning default forecast 0.0.")
+        df['lstm_forecast'] = 0.0
+    except Exception as e:
+        logger.error(f"Error during LSTM prediction: {e}", exc_info=True)
         df['lstm_forecast'] = 0.0
     return df

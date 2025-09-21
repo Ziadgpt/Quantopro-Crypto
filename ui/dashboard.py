@@ -10,9 +10,9 @@ from celery.result import AsyncResult
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(project_root)
 
-# --- FIX: Import the 'celery_app' instance itself, along with the tasks ---
-from tasks import celery_app, run_pipeline_task, train_all_models_task, run_tuning_task, run_backtest_task
-# --- END FIX ---
+# Import all our celery tasks and data functions
+from tasks import celery_app, run_pipeline_task, run_tuning_study, train_all_models_task, run_tuning_task, \
+    run_backtest_task
 from data.database import read_data, get_market_list
 import logging
 
@@ -20,7 +20,6 @@ logger = logging.getLogger(__name__)
 st.set_page_config(page_title="Crypto Bot 2.0 Dashboard", layout="wide")
 
 
-# (Helper functions for display remain the same)
 def display_kpis(kpis):
     st.subheader("📈 Key Performance Indicators")
     cols = st.columns(len(kpis))
@@ -41,7 +40,6 @@ def display_trades_log(trades_df):
     st.dataframe(trades_df)
 
 
-# (Session state initialization remains the same)
 if 'backtest_task_id' not in st.session_state:
     st.session_state.backtest_task_id = None
 if 'backtest_results' not in st.session_state:
@@ -49,44 +47,47 @@ if 'backtest_results' not in st.session_state:
 
 st.title("Crypto Bot 2.0 Dashboard")
 
-# (Sidebar and button logic remain the same)
 st.sidebar.title("🛠️ Control Panel")
 st.sidebar.info("Tasks run in the background. Check your Celery worker terminal for progress.")
-if st.sidebar.button("Run Data Pipeline"):
+
+if st.sidebar.button("1. Fetch Market Data"):
     task = run_pipeline_task.delay()
-    st.sidebar.success(f"Pipeline task started! (ID: {task.id})")
+    st.sidebar.success(f"Data pipeline task started!")
+
+if st.sidebar.button("2. Generate Predictions"):
+    task = run_tuning_task.delay()
+    st.sidebar.success(f"Prediction task started!")
+
 if st.sidebar.button("Train All Models"):
     task = train_all_models_task.delay()
-    st.sidebar.success(f"Model training started! (ID: {task.id})")
+    st.sidebar.success(f"Model training started!")
+
 if st.sidebar.button("Tune Synthesizer Model"):
     task = run_tuning_task.delay()
-    st.sidebar.success(f"Hyperparameter tuning started! (ID: {task.id})")
+    st.sidebar.success(f"Hyperparameter tuning started!")
+
 if st.sidebar.button("Run Backtest"):
     task = run_backtest_task.delay()
     st.session_state.backtest_task_id = task.id
     st.session_state.backtest_results = None
-    st.sidebar.success(f"Backtest started! (ID: {task.id})")
+    st.sidebar.success(f"Backtest started!")
     st.rerun()
 
-# --- Main Page Content ---
 markets = get_market_list()
 
 if not markets:
-    st.error("No data found in database. Run the 'Data Pipeline' from the Control Panel.")
+    st.error("No data found. Please run '1. Fetch Market Data' from the Control Panel.")
 else:
     market = st.selectbox("Select Market", sorted(markets))
 
-    # --- Backtest Results Section ---
     if st.session_state.backtest_task_id:
-        # --- FIX: Pass the celery_app instance when checking the result ---
         result = AsyncResult(st.session_state.backtest_task_id, app=celery_app)
-        # --- END FIX ---
         if result.ready():
             if result.successful():
                 st.session_state.backtest_results = result.result
                 st.session_state.backtest_task_id = None
             else:
-                st.error("Backtest task failed. Check the Celery worker log for details.")
+                st.error("Backtest task failed. Check Celery log for details.")
                 st.session_state.backtest_task_id = None
         else:
             st.info("🔄 Backtest in progress, please wait...")
@@ -103,7 +104,6 @@ else:
             display_trades_log(results_data['trades_log'])
             st.divider()
 
-    # (Market data section remains the same)
     if market:
         df = read_data(market)
         if not df.empty:

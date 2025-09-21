@@ -9,7 +9,7 @@ from models.hmm_model import train_hmm_model
 from models.lstm_model import train_lstm_model
 from models.synthesizer import train_synthesizer_model
 from trading.backtesting import run_backtest
-from models.tune_synthesizer import run_tuning_study # We'll create this function next
+from models.tune_synthesizer import run_tuning_study
 
 # Initialize logger for Celery tasks
 logger = get_task_logger(__name__)
@@ -47,14 +47,11 @@ def train_all_models_task():
         logger.error(error_message, exc_info=True)
         return error_message
 
-# --- NEW TASKS ADDED BELOW ---
-
 @celery_app.task(name='tasks.run_tuning_task')
 def run_tuning_task():
     """Celery task to run hyperparameter tuning."""
     logger.info("Celery task started: Running hyperparameter tuning...")
     try:
-        # We need to refactor tune_synthesizer.py to have a callable function
         run_tuning_study()
         result = "Hyperparameter tuning completed successfully."
         logger.info(result)
@@ -69,7 +66,6 @@ def run_backtest_task():
     """Celery task to run a backtest."""
     logger.info("Celery task started: Running backtest...")
     try:
-        # Assuming run_backtest() returns a dict or string summary
         results = run_backtest()
         logger.info("Backtest completed successfully.")
         return results
