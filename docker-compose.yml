@@ -1,0 +1,26 @@
+# docker-compose.yml
+version: '3.8'
+
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+  worker:
+    build: .
+    command: celery -A tasks worker -P gevent -c 8 --loglevel=info
+    volumes:
+      - .:/app
+    depends_on:
+      - redis
+
+  dashboard:
+    build: .
+    ports:
+      - "8501:8501"
+    volumes:
+      - .:/app
+    depends_on:
+      - redis
+      - worker
