@@ -1,18 +1,25 @@
-# Core Data Science & Numerical Libraries
+# Core & Web
+streamlit
 pandas
+plotly
 numpy
 
-# API Clients & Networking
-requests
+# Asynchronous Tasks & Networking
+celery
+redis
 dydx-v4-client
+aiohttp
+python-dotenv
 
 # Machine Learning & Modeling
+tensorflow
 scikit-learn
 hmmlearn
-tensorflow
 lightgbm
-joblib
+optuna
 
-# User Interface & Visualization
-streamlit
-plotly
+# Dependency Fixes
+# Pin protobuf to a version compatible with streamlit and tensorflow
+protobuf<5.0
+# Ensure setuptools is a modern version
+setuptools>=60.9.0
